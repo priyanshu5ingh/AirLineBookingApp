@@ -1,32 +1,55 @@
-import { Injectable, ConflictException, UnauthorizedException } from '@nestjs/common';
+// 1. FORCE LOAD .ENV
+import 'dotenv/config'; 
+
+import { Injectable, ConflictException, UnauthorizedException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { RegisterDto, LoginDto } from './dto/auth.dto';
 
-const prisma = new PrismaClient();
-
 @Injectable()
-export class AuthService {
-  constructor(private jwtService: JwtService) {}
+export class AuthService implements OnModuleInit, OnModuleDestroy {
+  private prisma: PrismaClient;
 
-  // 1. REGISTER USER
+  constructor(private jwtService: JwtService) {
+    // Debug: Check if the password was found
+    if (!process.env.DATABASE_URL) {
+      console.error("❌ CRITICAL ERROR: .env file not found or DATABASE_URL is missing!");
+    } else {
+      console.log("✅ .env loaded. Database URL found.");
+    }
+
+    // 2. Initialize Prisma with the URL explicitly
+    this.prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: process.env.DATABASE_URL,
+        },
+      },
+    });
+  }
+
+  async onModuleInit() {
+    await this.prisma.$connect();
+  }
+
+  async onModuleDestroy() {
+    await this.prisma.$disconnect();
+  }
+
+  // --- REGISTER ---
   async register(dto: RegisterDto) {
-    // Check if user exists
-    const existing = await prisma.user.findUnique({ where: { email: dto.email } });
+    const existing = await this.prisma.user.findUnique({ where: { email: dto.email } });
     if (existing) throw new ConflictException('Email already in use');
 
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(dto.password, salt);
 
-    // Create User (Default role: CUSTOMER, Tier: STANDARD)
-    const user = await prisma.user.create({
+    const user = await this.prisma.user.create({
       data: {
         email: dto.email,
         passwordHash: hash,
         fullName: dto.fullName,
-        // We link them to the 'STANDARD' tier automatically
         tier: { connect: { name: 'STANDARD' } }, 
       },
     });
@@ -34,16 +57,14 @@ export class AuthService {
     return { message: 'User registered successfully', userId: user.id };
   }
 
-  // 2. LOGIN USER
+  // --- LOGIN ---
   async login(dto: LoginDto) {
-    const user = await prisma.user.findUnique({ where: { email: dto.email } });
+    const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
     if (!user) throw new UnauthorizedException('Invalid credentials');
 
-    // Compare Password
     const isMatch = await bcrypt.compare(dto.password, user.passwordHash);
     if (!isMatch) throw new UnauthorizedException('Invalid credentials');
 
-    // Generate Token
     const payload = { sub: user.id, email: user.email, role: user.role };
     const token = await this.jwtService.signAsync(payload);
 
