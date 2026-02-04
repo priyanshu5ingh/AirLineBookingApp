@@ -1,0 +1,403 @@
+// Source: Section 5 of Airline-Booking-Blueprint.pdf
+// Status: Production-Ready
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------
+// Enums (Standardizing Statuses)
+// --------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  SUPPORT_AGENT
+  FLIGHT_MANAGER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum TierLevel {
+  STANDARD
+  PLUS
+  PREMIUM
+}
+
+enum BookingStatus {
+  INITIATED
+  HELD
+  CONFIRMED
+  CANCELLED
+  REFUNDED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum TicketPriority {
+  P0 // Critical
+  P1 // High
+  P2 // Medium
+  P3 // Low
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// --------------------------------------
+// 1. Users & Authentication [Blueprint 5.1]
+// --------------------------------------
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String    @map("password_hash")
+  fullName        String    @map("full_name")
+  phone           String?
+  dateOfBirth     DateTime? @map("date_of_birth") @db.Date
+  role            UserRole  @default(CUSTOMER)
+  loyaltyPoints   Int       @default(0) @map("loyalty_points")
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  isActive        Boolean   @default(true) @map("is_active")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  tier              Tier?                @relation(fields: [tierId], references: [id])
+  tierId            String?              @map("tier_id")
+  bookings          Booking[]
+  supportTickets    SupportTicket[]      @relation("UserTickets")
+  assignedTickets   SupportTicket[]      @relation("AssignedTickets")
+  loyaltyHistory    LoyaltyTransaction[]
+  loungeVouchers    LoungeVoucher[]
+  processedRefunds  Refund[]             @relation("ProcessedRefunds")
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+// --------------------------------------
+// 2. Tiers & Benefits [Blueprint 5.1]
+// --------------------------------------
+
+model Tier {
+  id                   String    @id @default(uuid())
+  name                 TierLevel @unique
+  description          String?
+  baseMarkupPercentage Decimal   @map("base_markup_percentage") @db.Decimal(5, 2)
+  benefits             Json      // Stored as JSONB for flexibility
+  pricePerYear         Decimal   @map("price_per_year") @db.Decimal(10, 2)
+  loungeAccessLimit    Int?      @map("lounge_access_limit")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  users     User[]
+  bookings  Booking[]
+
+  @@map("tiers")
+}
+
+// --------------------------------------
+// 3. Flights & Inventory [Blueprint 5.1]
+// --------------------------------------
+
+model Airline {
+  id        String   @id @default(uuid())
+  iataCode  String   @unique @map("iata_code") // e.g., "AI", "EK"
+  name      String
+  logoUrl   String?  @map("logo_url")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  flights Flight[]
+
+  @@map("airlines")
+}
+
+model Airport {
+  id        String   @id @default(uuid())
+  iataCode  String   @unique @map("iata_code") // e.g., "BOM", "DXB"
+  name      String
+  city      String
+  country   String
+  timezone  String
+  latitude  Decimal? @db.Decimal(9, 6)
+  longitude Decimal? @db.Decimal(9, 6)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  departingFlights Flight[] @relation("OriginAirport")
+  arrivingFlights  Flight[] @relation("DestinationAirport")
+  loungeVouchers   LoungeVoucher[]
+
+  @@map("airports")
+}
+
+model Flight {
+  id                   String   @id @default(uuid())
+  gdsFlightId          String   @unique @map("gds_flight_id") // ID from Amadeus (or Mock)
+  flightNumber         String   @map("flight_number")
+  departureTime        DateTime @map("departure_time")
+  arrivalTime          DateTime @map("arrival_time")
+  basePrice            Decimal  @map("base_price") @db.Decimal(10, 2)
+  currency             String   @default("INR")
+  aircraftType         String?  @map("aircraft_type")
+  totalSeats           Int      @map("total_seats")
+  status               String   @default("SCHEDULED")
+  gdsSyncedAt          DateTime? @map("gds_synced_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  // Foreign Keys
+  airlineId            String   @map("airline_id")
+  originAirportId      String   @map("origin_airport_id")
+  destinationAirportId String   @map("destination_airport_id")
+
+  // Relations
+  airline            Airline   @relation(fields: [airlineId], references: [id])
+  originAirport      Airport   @relation("OriginAirport", fields: [originAirportId], references: [id])
+  destinationAirport Airport   @relation("DestinationAirport", fields: [destinationAirportId], references: [id])
+  seatInventory      SeatInventory[]
+  bookings           Booking[]
+
+  @@index([originAirportId, destinationAirportId, departureTime])
+  @@map("flights")
+}
+
+model SeatInventory {
+  id          String   @id @default(uuid())
+  cabinClass  String   @map("cabin_class") // ECONOMY, BUSINESS
+  totalSeats  Int      @map("total_seats")
+  bookedSeats Int      @default(0) @map("booked_seats")
+  heldSeats   Int      @default(0) @map("held_seats")
+  version     Int      @default(0) // CRITICAL: For Optimistic Locking
+  updatedAt   DateTime @default(now()) @map("updated_at")
+
+  flight      Flight   @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  flightId    String   @map("flight_id")
+
+  @@unique([flightId, cabinClass])
+  @@map("seat_inventory")
+}
+
+// --------------------------------------
+// 4. Bookings & Passengers [Blueprint 5.1]
+// --------------------------------------
+
+model Booking {
+  id               String        @id @default(uuid())
+  pnr              String        @unique // Generated internally or from GDS
+  status           BookingStatus @default(INITIATED)
+  paymentStatus    PaymentStatus @default(PENDING) @map("payment_status")
+  
+  // Financials
+  baseAmount       Decimal       @map("base_amount") @db.Decimal(10, 2)
+  tierMarkup       Decimal       @default(0) @map("tier_markup") @db.Decimal(10, 2)
+  taxAmount        Decimal       @default(0) @map("tax_amount") @db.Decimal(10, 2)
+  totalAmount      Decimal       @map("total_amount") @db.Decimal(10, 2)
+  currency         String        @default("INR")
+
+  // Contact Info
+  contactEmail     String        @map("contact_email")
+  contactPhone     String        @map("contact_phone")
+
+  // Timestamps
+  bookingExpiresAt DateTime?     @map("booking_expires_at")
+  confirmedAt      DateTime?     @map("confirmed_at")
+  cancelledAt      DateTime?     @map("cancelled_at")
+  cancellationReason String?     @map("cancellation_reason")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  user              User?         @relation(fields: [userId], references: [id])
+  userId            String?       @map("user_id")
+  flight            Flight        @relation(fields: [flightId], references: [id])
+  flightId          String        @map("flight_id")
+  tier              Tier?         @relation(fields: [tierId], references: [id])
+  tierId            String?       @map("tier_id")
+  
+  passengers        Passenger[]
+  payments          Payment[]
+  refunds           Refund[]
+  loyaltyTransactions LoyaltyTransaction[]
+  loungeVouchers    LoungeVoucher[]
+  supportTickets    SupportTicket[]
+
+  @@index([userId])
+  @@index([pnr])
+  @@map("bookings")
+}
+
+model Passenger {
+  id             String   @id @default(uuid())
+  fullName       String   @map("full_name")
+  dateOfBirth    DateTime @map("date_of_birth") @db.Date
+  gender         String
+  documentType   String   @map("document_type") // PASSPORT, ID_CARD
+  documentNumber String   @map("document_number")
+  documentExpiry DateTime? @map("document_expiry") @db.Date
+  nationality    String
+  seatNumber     String?  @map("seat_number")
+  mealPreference String?  @map("meal_preference")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  bookingId String  @map("booking_id")
+
+  @@map("passengers")
+}
+
+// --------------------------------------
+// 5. Payments [Blueprint 5.1]
+// --------------------------------------
+
+model Payment {
+  id               String        @id @default(uuid())
+  gateway          String        // RAZORPAY, STRIPE
+  gatewayPaymentId String        @unique @map("gateway_payment_id")
+  status           PaymentStatus @default(PENDING)
+  amount           Decimal       @db.Decimal(10, 2)
+  currency         String        @default("INR")
+  paymentMethod    String?       @map("payment_method")
+  idempotencyKey   String        @unique @map("idempotency_key")
+  failureReason    String?       @map("failure_reason")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  bookingId String?  @map("booking_id")
+  refunds   Refund[]
+
+  @@index([bookingId])
+  @@map("payments")
+}
+
+model Refund {
+  id              String   @id @default(uuid())
+  gatewayRefundId String?  @unique @map("gateway_refund_id")
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("INR")
+  reason          String
+  status          String   @default("PENDING")
+  processedAt     DateTime? @map("processed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  payment       Payment? @relation(fields: [paymentId], references: [id])
+  paymentId     String?  @map("payment_id")
+  booking       Booking? @relation(fields: [bookingId], references: [id])
+  bookingId     String?  @map("booking_id")
+  processedBy   User?    @relation("ProcessedRefunds", fields: [processedById], references: [id])
+  processedById String?  @map("processed_by")
+
+  @@map("refunds")
+}
+
+// --------------------------------------
+// 6. Loyalty & Support [Blueprint 5.1]
+// --------------------------------------
+
+model LoyaltyTransaction {
+  id           String   @id @default(uuid())
+  points       Int
+  type         String   // EARNED, REDEEMED
+  description  String?
+  balanceAfter Int      @map("balance_after")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String   @map("user_id")
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  bookingId String?  @map("booking_id")
+
+  @@map("loyalty_transactions")
+}
+
+model SupportTicket {
+  id           String        @id @default(uuid())
+  ticketNumber String        @unique @map("ticket_number")
+  priority     TicketPriority @default(P3)
+  status       TicketStatus   @default(OPEN)
+  category     String
+  subject      String
+  assignedAt   DateTime?     @map("assigned_at")
+  resolvedAt   DateTime?     @map("resolved_at")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  user         User?    @relation("UserTickets", fields: [userId], references: [id])
+  userId       String?  @map("user_id")
+  booking      Booking? @relation(fields: [bookingId], references: [id])
+  bookingId    String?  @map("booking_id")
+  assignedTo   User?    @relation("AssignedTickets", fields: [assignedToId], references: [id])
+  assignedToId String?  @map("assigned_to")
+  
+  messages     TicketMessage[]
+
+  @@map("support_tickets")
+}
+
+model TicketMessage {
+  id          String   @id @default(uuid())
+  senderType  String   @map("sender_type") // USER, AGENT
+  message     String
+  attachments Json?    // JSONB for file URLs
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  ticket      SupportTicket @relation(fields: [ticketId], references: [id])
+  ticketId    String        @map("ticket_id")
+
+  @@map("ticket_messages")
+}
+
+model LoungeVoucher {
+  id            String   @id @default(uuid())
+  loungePartner String   @map("lounge_partner")
+  qrCode        String   @map("qr_code")
+  validFrom     DateTime @map("valid_from")
+  validUntil    DateTime @map("valid_until")
+  status        String   @default("ACTIVE") // ACTIVE, USED, EXPIRED
+  usedAt        DateTime? @map("used_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user      User?    @relation(fields: [userId], references: [id])
+  userId    String?  @map("user_id")
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  bookingId String?  @map("booking_id")
+  airport   Airport? @relation(fields: [airportId], references: [id])
+  airportId String?  @map("airport_id")
+
+  @@map("lounge_vouchers")
+}
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  actorRole     String   @map("actor_role")
+  action        String
+  entityType    String   @map("entity_type") // BOOKING, USER, FLIGHT
+  entityId      String   @map("entity_id")
+  changesBefore Json?    @map("changes_before")
+  changesAfter  Json?    @map("changes_after")
+  ipAddress     String?  @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  actorUser     User?    @relation(fields: [actorUserId], references: [id])
+  actorUserId   String?  @map("actor_user_id")
+
+  @@map("audit_logs")
+}
