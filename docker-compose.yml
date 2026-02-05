@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # 1. The Database (We keep this same as before)
+  postgres:
+    image: postgres:15
+    container_name: airline-pg
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: airline_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - airline-network
+
+  # 2. Redis (The New Speed Engine)
+  redis:
+    image: redis:alpine
+    container_name: airline-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - airline-network
+
+networks:
+  airline-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

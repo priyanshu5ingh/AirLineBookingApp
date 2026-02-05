@@ -1,91 +1,143 @@
-import { PrismaClient, TierLevel } from '@prisma/client';
+import { PrismaClient, UserRole, TierLevel } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 Starting Database Seed...');
+  console.log('🌱 Starting Enterprise Database Seed...');
 
-  // 1. Seed Tiers (Using the official Enums)
-  const tiers = [
-    {
-      name: TierLevel.STANDARD, // <--- Fixed: Using Enum, not string
-      baseMarkupPercentage: 0.00,
-      pricePerYear: 0.00,
-      benefits: { prioritySupport: false, loungeAccess: false },
+  // 1. CLEANUP (Delete in specific order to respect Foreign Keys)
+  // We handle the "Relation Constraint" errors by deleting children first
+  await prisma.auditLog.deleteMany();
+  await prisma.payment.deleteMany();
+  await prisma.booking.deleteMany();
+  await prisma.seatInventory.deleteMany();
+  await prisma.flight.deleteMany();
+  await prisma.airport.deleteMany();
+  await prisma.airline.deleteMany();
+  await prisma.user.deleteMany();
+  await prisma.tier.deleteMany();
+
+  // 2. CONFIGURATION: TIERS
+  console.log('   ↳ Creating Tiers...');
+  const standardTier = await prisma.tier.create({
+    data: {
+      name: TierLevel.STANDARD,
+      baseMarkupPercentage: 0.0,
+      pricePerYear: 0.0,
+      benefits: { priorityBoarding: false, extraBaggage: false },
     },
-    {
-      name: TierLevel.PLUS,
-      baseMarkupPercentage: 5.00,
-      pricePerYear: 4999.00,
-      benefits: { prioritySupport: 'Limited', loungeAccess: true },
-    },
-    {
-      name: TierLevel.PREMIUM,
-      baseMarkupPercentage: 10.00,
-      pricePerYear: 9999.00,
-      benefits: { prioritySupport: '24/7 Dedicated', loungeAccess: 'Unlimited' },
-    },
-  ];
-
-  for (const tier of tiers) {
-    await prisma.tier.upsert({
-      where: { name: tier.name },
-      update: {},
-      create: tier,
-    });
-    console.log(`✅ Tier seeded: ${tier.name}`);
-  }
-
-  // 2. Seed Airports
-  const airports = [
-    { iataCode: 'BOM', name: 'Mumbai International', city: 'Mumbai', country: 'India', timezone: 'Asia/Kolkata' },
-    { iataCode: 'DEL', name: 'Indira Gandhi International', city: 'New Delhi', country: 'India', timezone: 'Asia/Kolkata' },
-  ];
-
-  for (const airport of airports) {
-    await prisma.airport.upsert({
-      where: { iataCode: airport.iataCode },
-      update: {},
-      create: airport,
-    });
-  }
-
-  // 3. Seed Mock Flight
-  const airline = await prisma.airline.upsert({
-    where: { iataCode: 'AI' },
-    update: {},
-    create: { iataCode: 'AI', name: 'Air India' },
   });
 
-  const bom = await prisma.airport.findUnique({ where: { iataCode: 'BOM' } });
-  const del = await prisma.airport.findUnique({ where: { iataCode: 'DEL' } });
+  const premiumTier = await prisma.tier.create({
+    data: {
+      name: TierLevel.PREMIUM,
+      baseMarkupPercentage: 5.0, 
+      pricePerYear: 4999.00,
+      benefits: { priorityBoarding: true, extraBaggage: true, loungeAccess: true },
+      loungeAccessLimit: 12
+    },
+  });
 
-  if (bom && del) {
-    await prisma.flight.upsert({
-      where: { gdsFlightId: 'MOCK-101' },
-      update: {},
-      create: {
-        gdsFlightId: 'MOCK-101',
-        flightNumber: 'AI-202',
-        airlineId: airline.id,
-        originAirportId: bom.id,
-        destinationAirportId: del.id,
-        departureTime: new Date(new Date().getTime() + 24 * 60 * 60 * 1000), // Tomorrow
-        arrivalTime: new Date(new Date().getTime() + 26 * 60 * 60 * 1000),   // Tomorrow + 2h
-        basePrice: 5000.00,
-        totalSeats: 120,
-        seatInventory: {
-          create: [
-            { cabinClass: 'ECONOMY', totalSeats: 100, bookedSeats: 0, version: 0 },
-            { cabinClass: 'BUSINESS', totalSeats: 20, bookedSeats: 0, version: 0 },
-          ],
-        },
-      },
-    });
-    console.log(`✅ Mock Flight seeded`);
-  }
+  // 3. INFRASTRUCTURE: AIRPORTS
+  console.log('   ↳ Creating Airports...');
+  const bom = await prisma.airport.create({
+    data: { iataCode: 'BOM', name: 'Chhatrapati Shivaji Maharaj', city: 'Mumbai', country: 'India', timezone: 'Asia/Kolkata' }
+  });
+  const del = await prisma.airport.create({
+    data: { iataCode: 'DEL', name: 'Indira Gandhi International', city: 'New Delhi', country: 'India', timezone: 'Asia/Kolkata' }
+  });
+  const dxb = await prisma.airport.create({
+    data: { iataCode: 'DXB', name: 'Dubai International', city: 'Dubai', country: 'UAE', timezone: 'Asia/Dubai' }
+  });
+
+  // 4. INFRASTRUCTURE: AIRLINES
+  console.log('   ↳ Creating Airlines...');
+  const indigo = await prisma.airline.create({
+    data: { iataCode: '6E', name: 'IndiGo' }
+  });
+  const emirates = await prisma.airline.create({
+    data: { iataCode: 'EK', name: 'Emirates' }
+  });
+
+  // 5. OPERATIONS: FLIGHTS & INVENTORY
+  console.log('   ↳ Scheduling Flights...');
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  // Flight 1: BOM -> DEL
+  const flight1 = await prisma.flight.create({
+    data: {
+      flightNumber: '6E-505',
+      gdsFlightId: 'GDS-1001',
+      airlineId: indigo.id,
+      originAirportId: bom.id,
+      destinationAirportId: del.id,
+      departureTime: tomorrow,
+      arrivalTime: new Date(new Date(tomorrow).setHours(tomorrow.getHours() + 2)),
+      basePrice: 4500.00,
+      totalSeats: 180,
+    }
+  });
+
+  // Inventory: Instead of 180 rows, we create 2 rows (High Performance)
+  await prisma.seatInventory.create({
+    data: { flightId: flight1.id, cabinClass: 'ECONOMY', totalSeats: 150, version: 0 }
+  });
+  await prisma.seatInventory.create({
+    data: { flightId: flight1.id, cabinClass: 'BUSINESS', totalSeats: 30, version: 0 }
+  });
+
+  // Flight 2: BOM -> DXB
+  const dayAfter = new Date(tomorrow);
+  dayAfter.setDate(dayAfter.getDate() + 1);
+
+  const flight2 = await prisma.flight.create({
+    data: {
+      flightNumber: 'EK-500',
+      gdsFlightId: 'GDS-2002',
+      airlineId: emirates.id,
+      originAirportId: bom.id,
+      destinationAirportId: dxb.id,
+      departureTime: dayAfter,
+      arrivalTime: new Date(new Date(dayAfter).setHours(dayAfter.getHours() + 4)),
+      basePrice: 15000.00,
+      totalSeats: 300,
+    }
+  });
+
+  await prisma.seatInventory.createMany({
+    data: [
+      { flightId: flight2.id, cabinClass: 'ECONOMY', totalSeats: 250, version: 0 },
+      { flightId: flight2.id, cabinClass: 'BUSINESS', totalSeats: 40, version: 0 },
+      { flightId: flight2.id, cabinClass: 'FIRST', totalSeats: 10, version: 0 }
+    ]
+  });
+
+  // 6. SECURITY: USERS
+  console.log('   ↳ Creating Admin User...');
+  const salt = await bcrypt.genSalt(10);
+  const hash = await bcrypt.hash('admin123', salt);
+
+  await prisma.user.create({
+    data: {
+      email: 'admin@airline.com',
+      passwordHash: hash,
+      fullName: 'Super Admin',
+      role: UserRole.SUPER_ADMIN,
+      tierId: premiumTier.id,
+      emailVerified: true
+    }
+  });
+
+  console.log('🚀 SYSTEM SEED COMPLETED SUCCESSFULLY.');
 }
 
 main()
-  .catch((e) => { console.error(e); process.exit(1); })
-  .finally(async () => { await prisma.$disconnect(); });
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
