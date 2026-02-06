@@ -2,7 +2,7 @@ import { Injectable, BadRequestException, ConflictException, Logger } from '@nes
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import Redlock from 'redlock';
-
+import { SeatClass } from './dto/create-booking.dto'; // <--- 1. ADD THIS IMPORT
 @Injectable()
 export class BookingsService {
   private prisma = new PrismaClient();
@@ -27,8 +27,8 @@ export class BookingsService {
     return result;
   }
 
-  async createBooking(userId: string, flightId: string, seatClass: 'ECONOMY' | 'BUSINESS') {
-    const lockKey = `lock:flight:${flightId}:${seatClass}`;
+async createBooking(userId: string, flightId: string, seatClass: SeatClass) {
+      const lockKey = `lock:flight:${flightId}:${seatClass}`;
     
     let lock;
     try {
